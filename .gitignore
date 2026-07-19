@@ -1,0 +1,25 @@
+# Dataset -- 7.5 GB, redistributed from Mendeley. Never commit.
+# Download: https://data.mendeley.com/datasets/hms3sjzt7f/1
+data/
+
+# Decoded image cache -- 442 MB, regenerate with `python -m src.build_dataset`
+artifacts/*.npy
+
+# Small result files ARE tracked on purpose: artifacts/preds/*.csv,
+# artifacts/folds/*.csv and artifacts/master.parquet total ~300 KB and are what
+# back the results table in README.md. Without them the reported deltas cannot
+# be re-checked without a full GPU re-run.
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Editor / OS / tooling
+.vscode/
+.idea/
+.DS_Store
+.claude/
