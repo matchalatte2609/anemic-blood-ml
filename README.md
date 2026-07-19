@@ -290,6 +290,28 @@ measure the colour-only, background-only and focus-only baselines before believi
 
 ## Data
 
+**Source:** AneRBC dataset, Shahzad et al. (2024), *Database*, Volume 2024, article baae120,
+[doi.org/10.1093/database/baae120](https://doi.org/10.1093/database/baae120). Data hosted on
+Mendeley Data: [doi.org/10.17632/hms3sjzt7f.1](https://doi.org/10.17632/hms3sjzt7f.1), licensed
+CC BY 4.0.
+
+```bibtex
+@article{shahzad2024anerbc,
+  title   = {AneRBC dataset: a benchmark dataset for computer-aided anemia diagnosis using RBC images},
+  author  = {Shahzad, Muhammad and Shirazi, Syed Hamad and Yaqoob, Muhammad and Khan, Zakir
+             and Rasheed, Assad and Sheikh, Israr Ahmed and Hayat, Asad and Zhou, Huiyu},
+  journal = {Database},
+  volume  = {2024},
+  pages   = {baae120},
+  year    = {2024},
+  doi     = {10.1093/database/baae120}
+}
+```
+
+Not redistributed here (7.5 GB, CC BY 4.0 requires attribution rather than permitting
+rehosting as part of this repo) — download from the Mendeley link above and unpack to
+`data/AneRBC_dataset/`. See **Reproducing** below.
+
 `data/AneRBC_dataset/` — 7.5 GB total (AneRBC-I 3.7 GB, AneRBC-II 3.8 GB). Note: larger than
 the 5 GB the plan assumed; matters for Colab/Drive.
 
