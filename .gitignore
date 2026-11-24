@@ -1,6 +1,8 @@
 # Dataset -- 7.5 GB, redistributed from Mendeley. Never commit.
 # Download: https://data.mendeley.com/datasets/hms3sjzt7f/1
-data/
+# Only the small derived sample in data/sample/ is tracked.
+data/*
+!data/sample/
 
 # Decoded image cache -- 442 MB, regenerate with `python -m src.build_dataset`
 artifacts/*.npy
