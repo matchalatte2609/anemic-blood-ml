@@ -1,463 +1,242 @@
-# anemic-blood
+# anemic-blood-ml
 
-Does RBC morphology (image) add predictive signal over CBC indices (tabular) for anemia
-classification — and vice versa? Four arms: tabular-strong, tabular-fair, image-only, fusion.
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)
 
-**Status:** complete. All four arms trained and compared; see Final results below.
+Does the appearance of red blood cells (the smear image) add predictive signal over standard blood-count values for anemia classification, and the other way around? This project compares four model arms under a leakage-safe, statistically careful protocol, and uncovers a staining artifact that makes the naive image result misleading.
 
-> **Read the acquisition-artifact section before quoting any image-arm number.** Blank slide
-> background predicts the diagnosis at 0.87 AUROC on this dataset.
+> **Read the acquisition-artifact finding before quoting any image-arm number.** On this public dataset, blank slide background alone predicts the diagnosis at 0.87 AUROC.
 
----
+**Contents:** [Overview](#project-overview) · [Getting started](#getting-started) · [Objectives](#objectives-and-goals) · [Methodology](#methodology) · [Results](#results-and-key-findings) · [Visualizations](#visualizations) · [Next steps](#next-steps) · [Contributions](#individual-contributions) · [Leakage traps](#leakage-traps) · [Data and license](#data-and-license) · [Layout](#repository-layout)
 
-## The finding that reframes the project
+## Project overview
 
-**The label is a morphology call, not a hemoglobin threshold.**
+- **Data:** the public AneRBC dataset (Shahzad et al., 2024): 1000 blood smear images, 500 healthy and 500 anemic, each with a complete blood count (CBC) report.
+- **Task:** binary classification, anemic versus healthy, one prediction per patient.
+- **Four arms:** a strong tabular model, a fair tabular model, an image-only model, and fusion models that use both.
+- **Status:** complete. All arms are trained and compared.
+- **Headline results:**
+  - CBC values alone reach about 0.69 AUROC, and that is an honest ceiling.
+  - Image arms reach 0.94 to 0.96 AUROC, but the gap is largely an acquisition artifact and not a morphology result.
+  - The one defensible image-involving number is the small gain from adding CBC values to the image model: +0.016 AUROC, 95% interval [+0.006, +0.027].
 
-The original plan assumed "anemia *is* low hemoglobin, so including Hb gives ~1.0 AUROC and
-the comparison is meaningless." **That is empirically false for this dataset.** Measured
-univariate AUROCs over all 1000 samples:
+## Getting started
 
-| Feature | Coverage | AUROC |
+Everything below works straight after cloning. The parsed table, the folds and every arm's out-of-fold predictions are committed in `artifacts/`, so you do not need the 7.5 GB image dataset for the tabular arms, the notebooks or the evaluation.
+
+### 1. Set up locally
+
+```bash
+git clone https://github.com/matchalatte2609/anemic-blood-ml.git
+cd anemic-blood-ml
+
+python -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt    # pinned runtime packages, Jupyter and pytest
+
+pytest                                 # all tests pass in a few seconds
+```
+
+Requires Python 3.11 or newer (developed on 3.11, install and tests verified on 3.12).
+
+### 2. Train a model
+
+```bash
+python -m src.train --arm lgbm         # LightGBM on CBC values, about 3 seconds
+python -m src.train --arm mlp          # MLP on CBC values, about 7 seconds on Apple Silicon
+```
+
+Both tabular arms reproduced the committed predictions exactly when re-run on Apple Silicon. Training **overwrites** `artifacts/preds/<arm>.csv`. Undo with `git checkout artifacts/preds/`.
+
+The image and fusion arms (`--arm image`, `concat`, `film`, with `--stain-norm`) need the dataset and a GPU. See the [user guide](docs/user-guide.md#3-get-the-dataset-image-arms-only). The author measured about 25 minutes per image arm on Apple Silicon.
+
+### 3. Evaluate performance
+
+```bash
+python -m src.train --summary          # AUROC, AUPRC, ECE for every saved arm
+python -m src.train --compare concat_stainnorm image_stainnorm
+```
+
+The second command prints the paired bootstrap difference between two arms:
+
+```
+concat_stainnorm - image_stainnorm: delta=+0.0159 95% CI [+0.0061, +0.0269] -- significant
+```
+
+For a guided walk-through with figures, run the notebooks in `notebooks/`. The full instructions are in the [user guide](docs/user-guide.md).
+
+## Objectives and goals
+
+**Research question.** Does RBC morphology (image) add predictive signal over CBC indices (tabular) for anemia classification, and does the CBC add signal over the image?
+
+**Goals**
+
+1. **A fair comparison.** Give the tabular side a strong model (LightGBM) and a matched deep model (MLP), so that a fusion gain cannot come from a weak baseline.
+2. **No leakage.** Group the splits by patient, fit every imputer and scaler on training rows only, and keep the pathologist's report text out of the features.
+3. **Honest uncertainty.** Report the difference between arms with a paired bootstrap interval, not only a table of scores.
+4. **Surface confounds.** Test whether a surprisingly good result is measuring something other than the biology.
+5. **Reproducibility.** Make every reported number checkable from files in the repository.
+
+## Methodology
+
+**Data preparation.** The CBC reports are OCR text with at least seven kinds of corruption (shifted columns, mangled field names, missing commas, impossible values such as an RDW of 396). The parser anchors each number on its unit, normalizes field names, and discards values outside a plausible range. It adds no missing-value indicator columns. Each report becomes one row, joined to its image.
+
+**Splits.** `StratifiedGroupKFold` with 5 folds and seed 42. The group key is `{id}_{class}`, because `001_h` and `001_a` are different patients. Folds are built once, stored on disk and shared by every arm.
+
+**Model arms**
+
+| Arm | Input | Model |
 |---|---|---|
-| MCH | 92.9% | **0.697** |
-| MCV | 98.1% | **0.690** |
-| MCHC | 94.2% | 0.659 |
-| RDW | 63.0% | 0.634 |
-| **HGB** | 97.9% | **0.611** |
-| HCT | 95.5% | 0.598 |
-| PLT | 96.7% | 0.591 |
-| MPV | 68.2% | 0.561 |
-| RBC | 95.5% | 0.542 |
-| WBC | 98.1% | 0.522 |
+| `lgbm` | 8 CBC values, raw NaNs | LightGBM, heavily regularized (7 leaves, learning rate 0.03, up to 500 trees with early stopping) |
+| `mlp` | 8 CBC values, imputed and standardized | 2-layer MLP, hidden size 64, dropout 0.3 |
+| `image` | Smear image resized to 384 x 384 | ImageNet-pretrained ResNet18 (`timm`), flips, 90-degree rotations and mild color jitter |
+| `concat` | Image and CBC values | Image embedding and tabular embedding, each projected to 64 dimensions, concatenated, MLP head |
+| `film` | Image and CBC values | CBC values scale and shift the ResNet's final feature map (FiLM, zero-initialized so it starts as the image model) |
 
-Hemoglobin is nearly the *weakest* useful feature. 52% of "healthy"-labelled samples have
-Hb < 12 g/dL. The Hb distributions of the two classes overlap almost completely.
+**Fairness rules enforced in code**
 
-**Caveat on that table:** these are raw rank-AUROCs on *complete cases only* (each feature
-scored over the samples where it parses), so they are not directly comparable to a
-cross-validated model evaluated over all 1000. MCH scores 0.696 on its 929 complete cases but
-0.677 under 5-fold CV over everything. Use the CV numbers below as the baseline.
+- Imputation and standardization are fitted on the training rows of each fold only.
+- Early stopping watches an inner split of the training rows, never the outer fold.
+- All deep arms use one shared training loop with identical settings (up to 25 epochs, AdamW, learning rate 3e-4, patience 6).
+- Each fold is seeded with `seed + fold`.
 
-**Measured 5-fold LightGBM baselines** (native NaN, 60 trees, lr 0.03, `num_leaves=7`):
+**Evaluation.** AUROC, AUPRC and expected calibration error (ECE), as mean and standard deviation over the 5 folds. Differences between arms use a paired bootstrap: resample patient groups 2000 times, score both arms on each resample, and take the 2.5th and 97.5th percentiles. An interval that excludes zero is the result.
 
-| Feature set | AUROC |
-|---|---|
-| MCV + MCH + MCHC | **0.683** |
-| all 8 (`FEATURES_DEFAULT`) | 0.682 |
-| MCV + MCH | 0.682 |
-| + RDW | 0.679 |
-| MCH alone | 0.677 |
+## Results and key findings
 
-The extra features buy essentially nothing over the three red-cell indices. That is expected
-rather than disappointing: MCH = HGB/RBC, MCV = HCT/RBC and MCHC = HGB/HCT are algebraically
-interrelated, so the CBC panel carries far less independent information than its ten columns
-suggest. **~0.68 is the honest tabular ceiling.**
+Out-of-fold performance, 5 folds, mean and standard deviation:
 
-Why: the class assignment comes from the pathologist's **smear morphology** reading, not from
-a CBC threshold. Confirmed by keyword-counting all 1000 morphology reports:
-
-| Descriptor | Healthy | Anemic |
-|---|---|---|
-| normocytic | 84.8% | 12.2% |
-| normochromic | 82.8% | 8.8% |
-| microcytic | 13.0% | 88.2% |
-| hypochromic | 15.6% | 93.0% |
-| elliptocytes | 9.4% | 77.0% |
-| anisocytosis | 10.2% | 53.0% |
-
-A patient can have low Hb with normocytic normochromic RBCs (acute blood loss, anaemia of
-chronic disease) and still be labelled "healthy" here. The label answers *"does this smear
-look microcytic/hypochromic?"*, not *"is this patient anaemic?"*.
-
-### What follows from this
-
-1. **Dropping Hb/HCT is optional, not mandatory — now settled empirically.** The ablation has
-   been run (`--arm lgbm --with-hb`): adding HGB and HCT moves AUROC by **−0.0000, 95% CI
-   [−0.021, +0.020]**. Not a small effect — *no* effect. The plan's predicted ~1.0 AUROC
-   blow-up does not happen. Keep them excluded, but justify it as *"Hb is the clinical
-   definition of anaemia and a deployed model would not need a model to read it"*, and cite
-   the ablation rather than a leakage argument.
-2. **MCV/MCH are the actual near-label features.** "Microcytic" *means* low MCV; "hypochromic"
-   *means* low MCH. They are the instrument's measurement of the exact property the
-   pathologist eyeballed. They are not an independent modality — they are the same
-   measurement by another route. This is the honest framing of the tabular arm.
-3. **The expected outcome flipped — then turned out to be unanswerable here.** The original
-   plan predicted tabular wins. Since the label was generated *by looking at the image*, the
-   image arm should have the direct path. It does score far higher (0.94 vs 0.69) — but that
-   gap is substantially an acquisition artifact, not morphology (trap 4). The CBC's ~0.69 is
-   real; the image arm's 0.94 is not interpretable as a morphology result on this dataset.
-
-### Final results, all arms
-
-| Arm | AUROC | AUPRC | ECE | Trustworthy? |
+| Arm | AUROC | AUPRC | ECE | Trustworthy as a morphology result? |
 |---|---|---|---|---|
-| Concat fusion (stain-norm) | **0.959 ± 0.015** | 0.962 ± 0.013 | 0.070 | confounded |
-| FiLM fusion (stain-norm) | 0.954 ± 0.016 | 0.951 ± 0.022 | 0.077 | confounded |
-| Image, raw | 0.948 ± 0.010 | 0.946 ± 0.015 | 0.095 | **no — artifact** |
-| Image, stain-norm | 0.942 ± 0.012 | 0.946 ± 0.014 | 0.078 | **no — artifact** |
-| LightGBM (CBC) | 0.690 ± 0.031 | 0.636 ± 0.036 | 0.097 | yes |
-| MLP (CBC) | 0.689 ± 0.023 | 0.648 ± 0.030 | 0.097 | yes |
-| LightGBM + HGB/HCT | 0.686 ± 0.025 | 0.644 ± 0.034 | 0.106 | yes |
+| Concat fusion (stain-norm) | **0.959 ± 0.015** | 0.962 ± 0.013 | 0.070 | No, confounded |
+| FiLM fusion (stain-norm) | 0.954 ± 0.016 | 0.951 ± 0.022 | 0.077 | No, confounded |
+| Image, raw | 0.948 ± 0.010 | 0.946 ± 0.015 | 0.095 | No, artifact |
+| Image, stain-norm | 0.942 ± 0.012 | 0.946 ± 0.014 | 0.078 | No, artifact |
+| LightGBM (CBC) | 0.690 ± 0.031 | 0.636 ± 0.036 | 0.097 | Yes |
+| MLP (CBC) | 0.689 ± 0.023 | 0.648 ± 0.030 | 0.097 | Yes |
+| LightGBM + HGB/HCT | 0.686 ± 0.025 | 0.644 ± 0.034 | 0.106 | Yes |
 
-Paired bootstrap deltas (2000 resamples, grouped by patient):
+Paired bootstrap differences (2000 resamples, grouped by patient, first arm minus second):
 
-| Comparison | Delta | 95% CI | |
+| Comparison | Difference | 95% interval | Reading |
 |---|---|---|---|
-| concat − image | **+0.016** | [+0.006, +0.027] | significant |
-| FiLM − image | **+0.011** | [+0.000, +0.023] | significant, marginally |
-| FiLM − concat | −0.005 | [−0.012, +0.003] | no difference |
-| concat − lgbm | +0.275 | [+0.240, +0.309] | significant **but confounded** |
-| image − lgbm | +0.259 | [+0.221, +0.296] | significant **but confounded** |
-| stain-norm − raw image | +0.003 | [−0.008, +0.015] | no effect |
-| lgbm − mlp | −0.006 | [−0.026, +0.014] | no difference |
-| lgbm+Hb − lgbm | −0.000 | [−0.021, +0.020] | no effect |
+| concat - image | +0.016 | [+0.006, +0.027] | Significant. The one defensible image-involving number. |
+| FiLM - image | +0.011 | [+0.000, +0.023] | Significant, marginally |
+| FiLM - concat | -0.005 | [-0.012, +0.003] | No difference |
+| concat - LightGBM | +0.275 | [+0.240, +0.309] | Significant but confounded |
+| image - LightGBM | +0.259 | [+0.221, +0.296] | Significant but confounded |
+| stain-norm - raw image | +0.003 | [-0.008, +0.015] | No effect |
+| LightGBM - MLP | -0.006 | [-0.026, +0.013] | No difference |
+| LightGBM + HGB/HCT - LightGBM | -0.000 | [-0.021, +0.020] | No effect |
 
-FiLM matches concat rather than beating it (CI spans zero), so the extra conditioning machinery
-buys nothing here — report concat as the fusion arm and FiLM as the robustness check. Both
-recover the same small positive CBC contribution over the image arm (+0.016 and +0.011), which
-is the useful part: two architecturally different fusion schemes agree.
+**Key findings**
 
-**How to read this table.** Any row involving an image arm inherits the acquisition confound
-(trap 4) and cannot be quoted as a morphology-vs-CBC result. The `image − lgbm = +0.259` row is
-the cautionary exhibit: a large, tightly-bounded, entirely publishable-looking effect that is
-substantially measuring which imaging session a slide came from.
+1. **The label is a morphology call, not a hemoglobin threshold.** Hemoglobin ranks only fifth of ten features, and adding it to the model changes AUROC by -0.000 (interval [-0.021, +0.020]). Of "healthy" samples, 52% have hemoglobin below 12 g/dL.
+2. **About 0.69 AUROC is the honest tabular ceiling.** The three red-cell indices (MCV, MCH, MCHC) carry nearly all the signal, and they are derived from the same underlying measurements.
+3. **The tabular baseline was not crippled.** LightGBM and the MLP are statistically indistinguishable, so a fusion gain cannot be dismissed as a weak tabular branch.
+4. **The image result is confounded by acquisition.** Six numbers per image (channel means and standard deviations, no cells and no spatial information) predict the label at 0.905 AUROC. The same statistics over background pixels only, which contain no cells, reach 0.833. After per-image standardization, background-only statistics still reach 0.872. Healthy and anemic slides were evidently captured in systematically different sessions.
+5. **Some real signal survives.** A stain-invariant measure of how pale cells are relative to the background predicts at 0.734, in the expected direction (anemic cells are paler), which is about on par with the CBC.
+6. **Which fields a report contains leaks the label.** RDW is missing noticeably more often in anemic reports, and the flag "RDW is missing" alone scores 0.554 AUROC when recomputed from the committed table. This is why the pipeline imputes without missing-value indicator columns.
 
-**The one defensible image-involving number is `concat − image = +0.016`.** Because the paired
-bootstrap scores both arms on the same resamples and both arms carry the same artifact, the
-difference largely cancels it and isolates what the CBC adds on top. Small, positive, CI
-excludes zero: the blood indices contribute genuine physiological signal the image model does
-not already have. That is the honest fusion finding.
+**What can and cannot be re-checked here.** Every number in the two tables above, the hemoglobin ranking and the 52% figure in finding 1, the LightGBM and MLP baselines, and the missingness result in finding 6 are recomputed from committed files by the notebooks. Two sets of numbers are reported from the author's own runs instead. The feature-subset ablation behind finding 2 is not reproduced by a notebook. The image-artifact probes in findings 4 and 5 were run on the full 7.5 GB image set, and their code is not in this repository. See the [research notes](docs/research-notes.md) for the full log.
 
-### Stage 1 results (both tabular arms shipped)
+## Visualizations
 
-Out-of-fold, 5 folds, inner-split early stopping so the outer fold is never used for fitting:
+All figures are generated by the notebooks from the committed artifacts, in a light and a dark version.
 
-| Arm | AUROC | AUPRC | ECE |
-|---|---|---|---|
-| LightGBM (strong) | **0.690 ± 0.031** | 0.636 ± 0.036 | 0.097 ± 0.048 |
-| MLP (fair) | **0.689 ± 0.023** | 0.648 ± 0.030 | 0.097 ± 0.014 |
-| LightGBM + HGB/HCT | 0.686 ± 0.025 | 0.644 ± 0.034 | 0.106 ± 0.023 |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/arm-auroc-dark.png">
+  <img alt="AUROC by model arm: image arms near 0.95, CBC-only arms near 0.69" src="docs/figures/arm-auroc-light.png" width="760">
+</picture>
 
-`lgbm − mlp = −0.006, 95% CI [−0.026, +0.014]` — indistinguishable.
+*AUROC by arm. Orange arms use the image and are acquisition-confounded.*
 
-**That equivalence is load-bearing for the whole project.** The standard way a fusion paper
-manufactures a win is to pair a strong image encoder against a weak tabular branch. Here the
-"fair" MLP matches the GBDT ceiling, so a later fusion gain cannot be dismissed as the tabular
-arm having been crippled. Keep it that way: if you retune LightGBM, re-run the MLP too.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/paired-deltas-dark.png">
+  <img alt="Paired bootstrap differences in AUROC between arms with 95% intervals" src="docs/figures/paired-deltas-light.png" width="760">
+</picture>
 
-Predictions live in `artifacts/preds/{lgbm,mlp,lgbm_withhb}.csv` and are what `compare()` reads.
+*Paired bootstrap differences. The two large gaps against LightGBM are the confounded ones.*
 
----
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/roc-curves-dark.png">
+  <img alt="ROC curves for LightGBM, image-only and concat fusion arms" src="docs/figures/roc-curves-light.png" width="520">
+</picture>
+
+*ROC curves from pooled out-of-fold predictions. Pooled AUROCs differ slightly from the fold averages in the table.*
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/univariate-auroc-dark.png">
+  <img alt="Single-feature AUROC for each CBC feature, with hemoglobin highlighted" src="docs/figures/univariate-auroc-light.png" width="680">
+</picture>
+
+*Single-feature signal. Hemoglobin is not the strongest.*
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/missingness-dark.png">
+  <img alt="Share of reports where each field parses, by class" src="docs/figures/missingness-light.png" width="680">
+</picture>
+
+*RDW and MPV parse about 10 points less often in anemic reports.*
+
+## Next steps
+
+In rough order of value:
+
+1. **A defensible image arm.** Train on `RGB_segmented` (background masked out entirely), then try per-cell color normalization. Validate by checking that the background and artifact baselines drop to chance before reporting any headline number.
+2. **Ship the artifact probes.** Add the color, background-only and sharpness probe code so finding 4 can be re-checked from a clean checkout.
+3. **Use the 12 crops per patient.** Implement `pool_crop_embeddings` to mean-pool AneRBC-II crops up to one vector per patient. Keep folds at the patient level.
+4. **Report sex as a covariate.** The inferred sex is confounded with the class. Report models with and without it.
+5. **Auxiliary target.** Use the morphology report text only as a secondary multi-label target or for error analysis, never as a feature.
+
+## Individual contributions
+
+This is a solo project by Khang "Tom" Nguyen. I built the pipeline end to end:
+
+- the CBC report parser, its coverage audit and the audit of seven OCR corruption modes
+- the master table, the patient-grouped folds and the group-leak assertion
+- the five model arms and the shared training loop
+- the metrics and the paired group bootstrap
+- the leakage analysis, including the differential-missingness and staining-artifact findings
+- the notebooks, tests, figures and documentation in this repository
+
+The dataset is the work of its authors, credited below.
 
 ## Leakage traps
 
-### 1. Morphology reports are the label in prose — never use as features
-`Morphology_reports/*.txt` state the class in words ("microcytic hypochromic picture of
-RBCs"). Using their text, or any feature derived from it, is a ~90% direct label leak.
+The pipeline is built around four traps. Details and measurements are in the [research notes](docs/research-notes.md).
 
-**Legitimate uses:** stratification, error analysis (the ~13% of samples whose morphology text
-disagrees with the folder label are the interesting hard cases), and building an auxiliary
-multi-label target if you want a stretch goal.
+1. **Morphology reports are the label in prose.** Never use their text as a feature.
+2. **Split by patient group.** The group key is `{id}_{class}`, not the number alone.
+3. **Differential missingness.** Which fields a report contains differs by class. Impute without missing-value indicators.
+4. **Staining and acquisition artifact.** Empty slide background predicts the diagnosis, so naive image scores are inflated.
 
-### 2. AneRBC-II subimages — split by parent
-12 crops per parent, tiling the 1224×960 parent as a clean 4×3 grid of 306×320, no overlap.
-Verified: 500 parents × 12 = 6000 per class, both classes.
+## Data and license
 
-**The group key is `{parent_id}_{class}`, not `{parent_id}`.** `0001_h` and `0001_a` are
-different patients that share a numeric ID. Grouping on the number alone silently merges two
-patients into one group and corrupts the folds.
+The images and report text are **not** in this repository (7.5 GB). A 100-row CSV of parsed CBC values is in [`data/sample/`](data/sample/README.md), with a column dictionary. The full parsed table is `artifacts/master.parquet`.
 
-### 3. Differential missingness — the trap not in the original plan
-The CBC reports are inconsistent in *which* fields they contain, and the inconsistency
-correlates with the label:
+**Dataset:** Shahzad, M., Shirazi, S. H., Yaqoob, M., Khan, Z., Rasheed, A., Sheikh, I. A., Hayat, A., and Zhou, H. (2024). *AneRBC dataset: a benchmark dataset for computer-aided anemia diagnosis using RBC images.* Database, 2024, baae120. [doi.org/10.1093/database/baae120](https://doi.org/10.1093/database/baae120). Hosted on Mendeley Data at [doi.org/10.17632/hms3sjzt7f.1](https://doi.org/10.17632/hms3sjzt7f.1) under CC BY 4.0.
 
-| Artifact | AUROC as a standalone predictor |
-|---|---|
-| "RDW is missing" flag | 0.561 |
-| CBC report row count | 0.564 |
-| "has WBC differential" flag | 0.543 |
+**Code license:** MIT. See [LICENSE](LICENSE). This project is for research and education and is not for clinical use.
 
-RDW is present in 71.6% of healthy vs 59.8% of anemic reports — a 12-point gap. That artifact
-alone is as predictive as MPV's real signal (0.561). When the whole result hinges on a
-fusion-minus-unimodal delta of a few points, a 0.56 channel of pure recording artifact is not
-negligible.
-
-**Mitigation:** impute missing values; do **not** add missingness-indicator columns; do not
-feed row counts or any report-shape feature. If you want indicators, you must show the result
-survives without them.
-
-#### The clinical-suppression hypothesis, tested and rejected
-
-There is a real lab practice where analysers suppress RDW/MPV when the underlying RBC/PLT
-count is too low to be reliable. If that were generating the missingness here, it would be
-legitimate clinical signal and indicators would be defensible. It is not what is happening:
-
-| | correlation |
-|---|---|
-| RDW missing vs RBC | **+0.059** (mechanism predicts strongly negative) |
-| RDW missing vs report row count | **−0.791** |
-| MPV missing vs PLT | −0.131 |
-| MPV missing vs report row count | −0.442 |
-
-RDW is missing in 84% of short-format reports vs 7% of full-format ones. RDW and MPV go
-missing *together* (φ = 0.389, p = 7e-35) despite being different analytes on different
-channels — clinical suppression of one gives no reason for the other to follow. The lowest-RBC
-sample in the dataset (2.06) has RDW reported.
-
-The missingness tracks **which report template the lab used**, which correlates with class
-(+10.8% / +10.0%) through cohort composition rather than physiology.
-
-Measured cost/benefit, 5-fold, identical folds: indicators ON 0.6388, OFF 0.6346 — a **+0.004**
-gain, while the two flags alone score **0.553**. Nearly all of the (negligible) gain is
-artifact. `CBCImputer(add_indicators=True)` exists so this stays testable, not because it should
-be on.
-
----
-
-### 4. Staining / acquisition artifact in the images — the big one
-Discovered when the image arm returned 0.946 against a 0.690 tabular ceiling. That gap was
-mostly not morphology.
-
-| Feature set | AUROC |
-|---|---|
-| Full ResNet18 on raw images | 0.946 |
-| **6 numbers: per-channel mean + std, no spatial info, no cells** | **0.905** |
-| Same 6 numbers over **background pixels only** (no cells at all) | **0.833** |
-| Same 6 numbers over **cell pixels only** | 0.806 |
-| Cell-minus-background contrast (stain-invariant) | **0.734** |
-| Cell/background ratio (stain-invariant) | 0.765 |
-
-Background pixels carry no information about a patient's red cells, yet they out-predict the
-cell regions. That is staining batch, illumination and exposure — an acquisition artifact
-correlated with class, almost certainly because the two classes were collected or stained in
-different sessions. Any model free to use raw colour will take it.
-
-Note the mean shifts are tiny (red differs by 2.9/255) — this is not visible by eye and will
-not show up in a spot check of a few images. It only appears when you measure it.
-
-**What is real:** the stain-invariant contrast still predicts at 0.734, in the correct
-direction — anemic cells sit closer to background brightness, i.e. paler. That is genuine
-hypochromia, and it is roughly on par with the CBC's 0.690.
-
-#### Attempted mitigation — and why it is not enough
-
-`--stain-norm` (`data.PerImageStandardize`) forces every image to per-channel mean 0 / std 1.
-It provably destroys the six features above, since they become constants by construction. It is
-**not sufficient**. Measured after standardisation:
-
-| Feature set, post-standardisation | AUROC |
-|---|---|
-| **Background-only pixels (mean/std/skew/kurtosis)** | **0.872** |
-| Colour-distribution shape (skew + kurtosis, whole image) | 0.876 |
-| Sharpness / focus, 2 numbers | 0.724 |
-| Colour percentiles | 0.686 |
-| ResNet18 with `--stain-norm` | ~0.94 (unchanged from raw) |
-
-**The background-only number is the one that settles it.** Those pixels contain no cells. No
-biological pathway exists from empty slide to a patient's red-cell morphology. 0.872 there is
-pure acquisition signature, and it survives standardisation — the two classes differ in
-higher-order image statistics (distribution shape, focus), not merely in average colour.
-
-The stain-normalised CNN scoring the same as the raw CNN is consistent with this: it never
-needed the mean colour, because plenty of other artifact channels remain.
-
-#### What this means for the project
-
-**The image arm on this dataset cannot support a claim about morphology.** Healthy and anemic
-slides were evidently captured in systematically different sessions, and that difference is
-recoverable from regions containing no cells at all. Any image result here — 0.948 raw, ~0.94
-stain-normalised — is measuring the acquisition protocol to an unknown but large degree.
-
-Genuine biology is present too: the stain-invariant cell-minus-background contrast predicts at
-0.734 in the correct direction (anemic cells sit closer to background brightness = paler =
-hypochromic). But it cannot be separated from the confound by any post-hoc normalisation tried
-here, and 0.734 is not distinguishable from the CBC's 0.690.
-
-**Report this as the finding, not as a failure.** "A widely-used public anemia dataset carries a
-class-correlated acquisition artifact strong enough that empty slide background predicts the
-diagnosis at 0.87" is a more useful contribution than another fusion delta, and it invalidates
-naive benchmark numbers on AneRBC.
-
-If you want a defensible image arm, the next things to try, in order: train on `RGB_segmented`
-(background masked out entirely), then per-cell colour normalisation, and validate by checking
-the background/artifact baselines drop to chance **before** reporting any headline number.
-
-This generalises: whenever an image arm dramatically beats a tabular arm on medical data,
-measure the colour-only, background-only and focus-only baselines before believing it.
-
----
-
-## Data
-
-**Source:** AneRBC dataset, Shahzad et al. (2024), *Database*, Volume 2024, article baae120,
-[doi.org/10.1093/database/baae120](https://doi.org/10.1093/database/baae120). Data hosted on
-Mendeley Data: [doi.org/10.17632/hms3sjzt7f.1](https://doi.org/10.17632/hms3sjzt7f.1), licensed
-CC BY 4.0.
-
-```bibtex
-@article{shahzad2024anerbc,
-  title   = {AneRBC dataset: a benchmark dataset for computer-aided anemia diagnosis using RBC images},
-  author  = {Shahzad, Muhammad and Shirazi, Syed Hamad and Yaqoob, Muhammad and Khan, Zakir
-             and Rasheed, Assad and Sheikh, Israr Ahmed and Hayat, Asad and Zhou, Huiyu},
-  journal = {Database},
-  volume  = {2024},
-  pages   = {baae120},
-  year    = {2024},
-  doi     = {10.1093/database/baae120}
-}
-```
-
-Not redistributed here (7.5 GB, CC BY 4.0 requires attribution rather than permitting
-rehosting as part of this repo) — download from the Mendeley link above and unpack to
-`data/AneRBC_dataset/`. See **Reproducing** below.
-
-`data/AneRBC_dataset/` — 7.5 GB total (AneRBC-I 3.7 GB, AneRBC-II 3.8 GB). Note: larger than
-the 5 GB the plan assumed; matters for Colab/Drive.
+## Repository layout
 
 ```
-AneRBC-I/{Healthy,Anemic}_individuals/
-  Original_images/     500 × 1224×960 RGB PNG   001_h.png … 500_h.png
-  Binary_segmented/    500  (ground-truth masks, 1224×960)
-  RGB_segmented/       500  (masked RGB, 1224×960)
-  CBC_reports/         500 × .txt                001_h.txt …
-  Morphology_reports/  500 × .txt   <-- LABEL IN PROSE, NOT A FEATURE
-AneRBC-II/{Healthy,Anemic}_individuals/
-  Original_images/     6000 × 306×320  0001_01_h.png … 0500_12_h.png
-  Binary_segmented/, RGB_segmented/, CBC_reports/ (same 500 .txt), Morphology_reports/
+src/                   the library (see docs/api.md)
+  config.py            paths, constants, feature lists
+  parse_cbc.py         OCR'd CBC reports to tidy rows
+  build_dataset.py     master table and CBCImputer
+  splits.py            grouped stratified folds and the leak check
+  metrics.py           AUROC, AUPRC, ECE, paired group bootstrap
+  data.py              image cache, transforms, loaders
+  models/              tabular, image, fusion, shared training loop
+  train.py             arm runner and command line
+notebooks/             01 CBC exploration, 02 results and comparisons
+docs/                  user-guide.md, api.md, research-notes.md, figures/
+data/sample/           100-row CSV sample and its data dictionary
+artifacts/             parsed table, folds, out-of-fold predictions
+scripts/make_sample.py rebuilds the sample from the parsed table
+tests/                 fast tests, no dataset needed
 ```
 
-Naming: AneRBC-I `{id:03d}_{h|a}.png`; AneRBC-II `{parent:04d}_{crop:02d}_{h|a}.png`.
-Join II→I by `int(parent_id)` → `f"{id:03d}"`. Verified 500/500 match, no orphans either way.
-
-`upload_data_for_training.ipynb` ships with the dataset — the authors' loader example. Not
-used by this project's pipeline.
-
-### The CBC files are machine-readable — no transcription day needed
-They are comma-separated text, **not** scanned images. The plan's "budget one day to
-transcribe 1000 rows" contingency does not apply. But they are OCR output and dirty:
-
-```
-Test, Results/Units, Normal Range        <- header wording varies between files
-WBC,7.39 x10.e 3/μl,4 --- 10
-HGB,* 10.1 g/dL,12 --- 15                <- '*' = abnormal flag, inside the value field
-RDW---CV,12.8 %,11.5 --- 14.5
-```
-
-Corruption modes found, in rough order of nastiness:
-
-1. **Column-shift / fragment injection.** `056_h.txt`: `HGB,6/μl,13.5 g/dL,11 --- 14` — a
-   fragment of the previous row leaked into the value column. Naive "first number in field 2"
-   parsing returns `6` instead of `13.5`. **Anchor on the unit** (`g/dL`, `fL`, `pg`, `%`)
-   rather than on column position.
-2. **Field-name corruption.** The `#` absolute-count prefix is OCR'd as `$`, `%`, `&`. RDW
-   appears as `RDW---CV`, `%RDW---CV`, `$RDW---CV`, `&RDW---CV`, `%RDW-CV`, `RDW-CV`.
-   Strip all leading non-alpha, uppercase, drop `-`/`.`/space, then alias-map.
-3. **Name variants.** HGB is `HGB` (83%) *or* `Hemoglobin` (17%); both needed for full
-   coverage. Same for `Neut`/`NEUT`/`Neutrophil`/`Neutrophils`. One file has `MCHO` for MCHC.
-4. **Missing commas** merging name and value: `#EOS0.13 x10.e 3/μl`.
-5. **Physiologically impossible values** that survive parsing: RDW ranging 0.6 – 396.0
-   (real RDW-CV is ~11–25). Decimal misplacement, e.g. `HGB,1.48 g/dL` in `066_h.txt` /
-   `067_h.txt` is almost certainly 14.8. Out-of-range rates after plausibility filtering are
-   ~2–7% per field. **Range-filter to NaN, then impute. Do not trust raw parsed values.**
-6. **Unicode.** `μ` U+03BC (Greek mu) and `µ` U+00B5 (micro sign) both appear. Normalise.
-7. Row count varies 7–21 per file, bimodally (short reports lack the WBC differential).
-
-### Free feature hiding in the reference-range column
-The per-file "normal range" for HGB encodes sex: `13 --- 17` is the adult male reference
-range, `12 --- 15` female. Recoverable for most files — the plan's "age/sex if present" is
-partly satisfiable this way.
-
-**But it is confounded:** healthy splits ~167 female-range / 165 male-range, anemic ~117 / 56.
-Inferred sex is predictive partly through dataset composition, not physiology. Treat as a
-covariate to control for and report with/without, not as a free win. Age is not recoverable.
-
----
-
-## Environment
-
-conda env **`tomcat`** (`/opt/homebrew/Caskroom/miniconda/base/envs/tomcat`), Python 3.11.15.
-
-Installed and verified: torch 2.13.0, torchvision 0.28.0, timm 1.0.28, tqdm 4.69.0,
-lightgbm 4.6.0, scikit-learn 1.9.0, pandas 3.0.3, numpy 1.26.4, scipy 1.17.1, pillow 12.3.0,
-matplotlib 3.11.0.
-
-```bash
-conda activate tomcat
-```
-
-Apple Silicon: **MPS is available and verified** (ResNet18 forward pass on `mps` passes).
-Use `mps` locally; the plan's Colab T4 is optional. Set device via `src/config.py:DEVICE`.
-
-### The OpenMP crash — `src/__init__.py` handles it, don't reorder that file
-torch and LightGBM each ship their own `libomp.dylib`. The two copies fight and the process
-dies with **SIGSEGV (exit 139) and no traceback**. It is nondeterministic and surfaces wherever
-a thread pool spawns first, so the *same* bug appears as a crash in `LGBMClassifier.fit`, or
-inside a torchvision v2 transform, or during imports. It reads as a data bug. It is not.
-
-Two things are required, both before torch or lightgbm load:
-
-1. **`OMP_NUM_THREADS=1`** — stops the duplicate runtimes contending. Measured cost here:
-   none. 50 img/s single-threaded vs 47 img/s default, because the work sits on MPS and the
-   threads only added contention.
-2. **lightgbm imported ahead of torch** — necessary but **not sufficient alone**. It protects
-   `LGBMClassifier.fit` while leaving torchvision transforms crashing, which is exactly how
-   this was first misdiagnosed as fixed after the tabular arms started passing.
-
-Avoid `KMP_DUPLICATE_LIB_OK=TRUE`: it lets two OpenMP runtimes coexist and is documented as
-capable of producing silently wrong results.
-
-### Do not memmap the image cache
-`np.load(..., mmap_mode="r")` on `images_384.npy` is tempting at 442 MB but the array fits in
-RAM many times over, so paging buys nothing and adds a failure mode. `build_image_cache` loads
-it fully.
-
-Two version notes: **pandas is 3.0.x**, a major release with breaking changes — some
-StackOverflow-era idioms (`inplace=`, silent downcasting, `applymap`) are removed or changed.
-numpy is pinned <2 by the existing env.
-
----
-
-## Layout
-
-```
-src/config.py          paths, feature lists, CV/seed constants
-src/parse_cbc.py       CBC .txt -> tidy rows; unit-anchored, range-filtered
-src/build_dataset.py   master parquet + CBCImputer (train-fold-only fit)
-src/splits.py          grouped stratified CV + group-leak assertion
-src/metrics.py         AUROC/AUPRC/ECE + paired group bootstrap on deltas
-src/data.py            image cache, transforms, PerImageStandardize, loaders
-src/models/tabular.py  LightGBM + MLP arms, inner-split early stopping
-src/models/image.py    ResNet18 encoder (timm)
-src/models/fusion.py   concat fusion + FiLM (identity-initialised)
-src/models/common.py   ONE training loop shared by all deep arms
-src/train.py           arm runner, CV loop, comparisons, summary table
-```
-
-## Reproducing
-
-```bash
-conda activate tomcat
-python -m src.build_dataset            # parse CBC, join images, build folds
-python -m src.train --arm lgbm         # ~1 min
-python -m src.train --arm mlp
-python -m src.train --arm image --stain-norm     # ~25 min on MPS
-python -m src.train --arm concat --stain-norm
-python -m src.train --arm film --stain-norm
-python -m src.train --compare concat_stainnorm image_stainnorm
-python -m src.train --summary
-```
-
-The dataset is not in this repo (7.5 GB). Download from
-https://data.mendeley.com/datasets/hms3sjzt7f/1 and unpack to `data/AneRBC_dataset/`.
-
-Out-of-fold predictions for every arm are tracked in `artifacts/preds/`, so the reported deltas
-can be re-checked with `--compare` without re-training anything.
-
-## Conventions
-
-- Group key for every split: `group_id = f"{parent_id}_{cls}"`.
-- Label: `y = 1` for anemic, `0` for healthy.
-- Never let `Morphology_reports` text reach a feature matrix.
-- Report mean ± std across 5 folds, plus bootstrap 95% CI on the fusion-minus-best-unimodal
-  delta. The CI excluding zero is the result; a bare AUROC table is not.
+**Documentation:** [User guide](docs/user-guide.md) · [API reference](docs/api.md) · [Research notes](docs/research-notes.md)
