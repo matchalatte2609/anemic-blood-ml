@@ -1,0 +1,7 @@
+# Extra tools for running the notebooks and tests. Install after requirements.txt.
+-r requirements.txt
+ipykernel>=6.29
+nbclient>=0.10
+nbconvert>=7.16
+nbformat>=5.10
+pytest>=8
