@@ -317,9 +317,10 @@ CC BY 4.0.
 }
 ```
 
-Not redistributed here (7.5 GB, CC BY 4.0 requires attribution rather than permitting
-rehosting as part of this repo) - download from the Mendeley link above and unpack to
-`data/AneRBC_dataset/`. See **Reproducing** below.
+The images are not redistributed here because of their size (7.5 GB). CC BY 4.0 does allow
+redistribution with attribution, which is how the small derived CSV in `data/sample/` is
+shared. Download the full dataset from the Mendeley link above and unpack it to
+`data/AneRBC_dataset/`. See the [user guide](user-guide.md#3-get-the-dataset-image-arms-only).
 
 `data/AneRBC_dataset/` - 7.5 GB total (AneRBC-I 3.7 GB, AneRBC-II 3.8 GB). Note: larger than
 the 5 GB the plan assumed; matters for Colab/Drive.
